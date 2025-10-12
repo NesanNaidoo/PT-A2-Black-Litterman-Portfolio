@@ -326,7 +326,7 @@ summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
 )))
 
 
-knitr::kable(head(summary_df,5),
+knitr::kable(head(summary_df,10),
   digits = 4,
   caption = "In-sample vs Out-of-sample BL Portfolio Statistics"
 )
@@ -509,4 +509,4 @@ ggplot(t.err_df, aes(x = Window, y = TrackingError)) +
 ```
 
 \newpage
-
+# References

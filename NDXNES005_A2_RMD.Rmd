@@ -174,193 +174,346 @@ cat("Assets used for optimisation:\n"); print(colnames(rets_opt))
 if(!is.na(cash_name)) cat("Cash excluded from optimisation:", cash_name, "\n")
 ```
 
-### 2.5 Tangency Portfolio [@Tim_BTmlx; @Tim_prep]
+### 2.5 Black-Litterman function [@Tim_BTmlx; @Tim_prep]
 
 ```{r}
-tan.port <- function(mu, Sigma, rf=0, targets=seq(0.001,0.05,length.out=200)){
-  n <- length(mu)
-  Dmat <- 2*(Sigma + diag(1e-8,n))  # ensure PD covariance
-  best <- list(sharpe=-Inf)
-  
-  for(tgt in targets){
-    gamma <- as.numeric(mu - rf)
-    Amat <- cbind(gamma, -gamma, rep(1,n), -rep(1,n), diag(n))
-    bvec <- c(tgt, -tgt, 1, -1, rep(0,n))
-    sol <- try(solve.QP(Dmat, dvec=rep(0,n), Amat=as.matrix(Amat), bvec=bvec, meq=0), silent=TRUE)
-    if(inherits(sol,"try-error")) next
-    w <- sol$solution
-    w[w<1e-8] <- 0
-    if(sum(w)<=0) next
-    w <- w/sum(w)
-    port_mean <- sum(w*mu)
-    port_var  <- as.numeric(t(w) %*% Sigma %*% w)
-    if(port_var<=0) next
-    sr <- (port_mean - rf)/sqrt(port_var)
-    if(sr > best$sharpe) best <- list(weights=w, target=tgt, sharpe=sr, mean=port_mean, var=port_var)
+blacklittermann <- function(Pi, Sigma, P, Q, Omega, tau=0.05, gamma=1, constrain=TRUE){
+  n <- length(Pi)
+  Sigma_inv <- solve(Sigma)
+  Omega_inv <- solve(Omega)
+  mu_post <- solve(Sigma_inv*tau + t(P) %*% Omega_inv %*% P) %*%
+             (Sigma_inv %*% (tau * Pi) + t(P) %*% Omega_inv %*% Q)
+  Sigma_post <- Sigma + solve(Sigma_inv*tau + t(P) %*% Omega_inv %*% P)
+  w <- solve(gamma*Sigma_post) %*% mu_post
+  if(constrain){
+    w[w<0] <- 0
+    w <- w / sum(w)
   }
-  return(best)
+  w <- as.numeric(w)
+  names(w) <- names(Pi)
+  list(weights=w, mu_post=mu_post, Sigma_post=Sigma_post)
 }
+
+
+```
+
+### 2.5 a. Test Case
+```{r}
+Pi <- c(0.25, 0.10, 0.05)
+Sigma <- matrix(c(0.09, 0.024, -0.006,
+                  0.024, 0.01, 0.0003,
+                  -0.006, 0.0003, 0.0025), nrow=3, byrow=TRUE)
+P <- matrix(c(1, -1, 0,
+              0, 1, -1), nrow=2, byrow=TRUE)
+Q <- matrix(c(0.2, -0.05), nrow=2)
+Omega <- matrix(c(0.3, 0,
+                  0, 0.55), nrow=2)
+bl_test <- blacklittermann(Pi, Sigma, P, Q, Omega, tau=0.05, gamma=1, constrain=TRUE)
+bl_test$weights
+sum(bl_test$weights)
+
 ```
 
 ### 2.6 Rolling Window Experiment [@Tim_BTmlx; @Tim_prep]
 
 ```{r}
-train.m <- 60 # 5 year period
-test.m  <- 12 # 1 year period
-roll_step <- 1 #1 month increments
+### Rolling-window Black-Litterman Backtest with Turnover, Beta, and Jensen Alpha
+
+library(PerformanceAnalytics) # for CAPM functions
+
+train.m <- 60  # 5-year training period
+test.m  <- 12  # 1-year test period
+roll_step <- 1 # 1-month increments
 n_obs <- nrow(rets_opt)
 start_idxs <- seq(1, n_obs - train.m - test.m + 1, by=roll_step)
 results <- list()
+prev_w <- rep(0, ncol(rets_opt)) # initialize previous weights for turnover
+
+# ALSI column for beta calculation
+benchmark <- tsGRet_filled[, "ALSI", drop=FALSE]
 
 for(i in seq_along(start_idxs)){
   s <- start_idxs[i]
   train_idx <- s:(s+train.m-1)
-  tst.idx  <- (s+train.m):(s+train.m+test.m-1)
+  tst.idx   <- (s+train.m):(s+train.m+test.m-1)
   
   train_rets <- rets_opt[train_idx, , drop=FALSE]
-  tst.rets  <- rets_opt[tst.idx, , drop=FALSE]
-  
-  if(any(!is.finite(as.matrix(train_rets))) || any(!is.finite(as.matrix(tst.rets)))) next
-  
-  mu_train    <- colMeans(train_rets, na.rm=TRUE)
- Sigma_train <- cov(as.matrix(train_rets), use="complete.obs")
-
-  rf_train    <- if(!is.null(rets_cash)) mean(rets_cash[train_idx, ], na.rm=TRUE) else 0
-  rf_test     <- if(!is.null(rets_cash)) mean(rets_cash[tst.idx, ], na.rm=TRUE) else 0
+  tst_rets   <- rets_opt[tst.idx, , drop=FALSE]
+  bench_train <- benchmark[train_idx, , drop=FALSE]
+  bench_test  <- benchmark[tst.idx, , drop=FALSE]
   
   # Skip invalid windows
-  if(any(!is.finite(mu_train)) || !is.finite(rf_train)) next
-  upper_targ <- max(0.06, max(mu_train, na.rm=TRUE) - rf_train)
-  if(!is.finite(upper_targ) || upper_targ <= 0) next
+  if(any(!is.finite(as.matrix(train_rets))) || any(!is.finite(as.matrix(tst_rets)))) next
   
-  targ_grid <- seq(0.0005, upper_targ, length.out=300)
-  tang <- tan.port(mu=mu_train, Sigma=Sigma_train, rf=rf_train, targets=targ_grid)
-  if(is.null(tang$weights)) next
+  mu_train    <- colMeans(train_rets, na.rm=TRUE)
+  Sigma_train <- cov(as.matrix(train_rets), use="complete.obs")
   
-  w_hat <- tang$weights
+  # Risk-free
+  rf_train <- if(!is.null(rets_cash)) mean(rets_cash[train_idx, ], na.rm=TRUE) else 0
+  rf_test  <- if(!is.null(rets_cash)) mean(rets_cash[tst.idx, ], na.rm=TRUE) else 0
+  
+  # --- Black-Litterman views ---
+  P <- matrix(0, nrow=1, ncol=ncol(train_rets))
+  P[1, 1:3] <- 1/3       # simple example view
+  Q <- matrix(0.01, nrow=1) # expected 1% return
+  Omega <- matrix(0.0001, nrow=1) # view uncertainty
+  
+  bl_res <- blacklittermann(Pi=mu_train, Sigma=Sigma_train, P=P, Q=Q, Omega=Omega, tau=0.05, gamma=3,constrain=FALSE)
+  
+  # --- Constrain weights: no short, fully invested ---
+  w_hat <- bl_res$weights
+  w_hat[w_hat < 0] <- 0
+  w_hat <- w_hat / sum(w_hat)
+  
+  # --- Portfolio turnover ---
+  turnover <- sum(abs(w_hat - prev_w))
+  prev_w <- w_hat
+  
+  # --- Portfolio returns ---
   port_train <- as.numeric(as.matrix(train_rets) %*% w_hat)
-  port_test  <- as.numeric(as.matrix(tst.rets) %*% w_hat)
-
+  port_test  <- as.numeric(as.matrix(tst_rets) %*% w_hat)
   
-  results[[length(results)+1]] <- list(
-    train_period = paste(index(train_rets)[1], index(train_rets)[nrow(train_rets)], sep=" / "),
-    tst.period  = paste(index(tst.rets)[1], index(tst.rets)[nrow(tst.rets)], sep=" / "),
-    mu_IS = mean(port_train, na.rm=TRUE),
-    var_IS= var(port_train, na.rm=TRUE),
-    SR_IS =(mean(port_train, na.rm=TRUE)-rf_train)/sqrt(var(port_train, na.rm=TRUE)),
-    mu_OOS= mean(port_test, na.rm=TRUE),
-    var_OOS=var(port_test, na.rm=TRUE),
-    SR_OOS=(mean(port_test, na.rm=TRUE)-rf_test)/sqrt(var(port_test, na.rm=TRUE)),
-    weights = w_hat,
-    assets  = colnames(rets_opt)
-  )
-}
+  # --- Tracking Error relative to ALSI ---
+port_diff <- port_test - as.numeric(bench_test)
+tracking_error <- sd(port_diff, na.rm = TRUE)
+  
+  # --- Jensen Alpha & Beta relative to ALSI ---
+  # In-sample excess returns
+excess_port_train  <- port_train  - rf_train
+excess_bench_train <- as.numeric(bench_train) - rf_train
 
-summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
-  train=x$train_period, test=x$tst.period,
-  mu_IS=x$mu_IS, var_IS=x$var_IS, SR_IS=x$SR_IS,
-  mu_OOS=x$mu_OOS, var_OOS=x$var_OOS, SR_OOS=x$SR_OOS
-)))
-knitr::kable(
-  head(summary_df, 15),
-  digits = 4,
-  caption = "In-sample vs Out-of-sample Portfolio Statistics"
+CAPM_train <- lm(excess_port_train ~ excess_bench_train)
+alpha_IS <- coef(CAPM_train)[1]
+beta_IS  <- coef(CAPM_train)[2]
+
+# Out-of-sample excess returns
+excess_port_test  <- port_test  - rf_test
+excess_bench_test <- as.numeric(bench_test) - rf_test
+
+CAPM_test <- lm(excess_port_test ~ excess_bench_test)
+alpha_OOS <- coef(CAPM_test)[1]
+beta_OOS  <- coef(CAPM_test)[2]
+  
+  # --- Cumulative equity curve ---
+  eq_curve_test <- cumprod(1 + port_test)
+  
+  # Store results
+  results[[length(results)+1]] <- list(
+  train_period = paste(index(train_rets)[1], index(train_rets)[nrow(train_rets)], sep=" / "),
+  test_period  = paste(index(tst_rets)[1], index(tst_rets)[nrow(tst_rets)], sep=" / "),
+  mu_IS = mean(port_train, na.rm=TRUE),
+  var_IS = var(port_train, na.rm=TRUE),
+  SR_IS = (mean(port_train, na.rm=TRUE) - rf_train)/sqrt(var(port_train, na.rm=TRUE)),
+  mu_OOS = mean(port_test, na.rm=TRUE),
+  var_OOS = var(port_test, na.rm=TRUE),
+  SR_OOS = (mean(port_test, na.rm=TRUE) - rf_test)/sqrt(var(port_test, na.rm=TRUE)),
+  alpha_IS = alpha_IS,
+  beta_IS = beta_IS,
+  alpha_OOS = alpha_OOS,
+  beta_OOS = beta_OOS,
+  turnover = turnover,
+  tracking_error = tracking_error,   # ✅ <-- added
+  eq_curve_test = eq_curve_test,
+  weights = w_hat,
+  assets  = colnames(rets_opt)
 )
 
+}
+
+# Convert results to a data frame for plotting
+summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
+  train=x$train_period, test=x$test_period,
+  mu_IS=x$mu_IS, var_IS=x$var_IS, SR_IS=x$SR_IS,
+  mu_OOS=x$mu_OOS, var_OOS=x$var_OOS, SR_OOS=x$SR_OOS,
+  alpha_IS=x$alpha_IS, beta_IS=x$beta_IS,
+  alpha_OOS=x$alpha_OOS, beta_OOS=x$beta_OOS,
+  turnover=x$turnover,
+  tracking_error = x$tracking_error   
+)))
+
+
+knitr::kable(summary_df,
+  digits = 4,
+  caption = "In-sample vs Out-of-sample BL Portfolio Statistics with Turnover, Alpha and Beta"
+)
+
+
+```
+
+### Portfolio Turnover
+```{r}
+turnover_df <- data.frame(
+  Window = 1:length(results),
+  Turnover = sapply(results, function(x) x$turnover)
+)
+
+# Portfolio Turnover per Rolling Window
+ggplot(turnover_df, aes(x = Window, y = Turnover)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "",
+       x = "Rolling Window", y = "Turnover") +
+  theme_minimal()
+
+```
+
+
+### Jensens alpha and beta
+```{r}
+library(ggplot2)
+
+# Create data frame with both in-sample and out-of-sample Alpha and Beta
+alpha_beta_df <- data.frame(
+  Window = 1:length(results),
+  alpha_IS = sapply(results, function(x) x$alpha_IS),
+  alpha_OOS = sapply(results, function(x) x$alpha_OOS),
+  beta_IS = sapply(results, function(x) x$beta_IS),
+  beta_OOS = sapply(results, function(x) x$beta_OOS)
+)
+
+# In-Sample vs. Out-of-Sample Jensen's Alpha
+ggplot(alpha_beta_df, aes(x = Window)) +
+  geom_line(aes(y = alpha_IS, color = "In-Sample"), linewidth = 0.9) +
+  geom_line(aes(y = alpha_OOS, color = "Out-of-Sample"), linewidth = 0.9) +
+  labs(title = "",
+       x = "Rolling Window", y = "Alpha", color = "Sample Type") +
+  theme_minimal() +
+  scale_color_manual(values = c("In-Sample" = "darkgreen", "Out-of-Sample" = "darkblue"))
+
+# In-Sample vs. Out-of-Sample Portfolio Beta
+ggplot(alpha_beta_df, aes(x = Window)) +
+  geom_line(aes(y = beta_IS, color = "In-Sample"), linewidth = 0.9) +
+  geom_line(aes(y = beta_OOS, color = "Out-of-Sample"), linewidth = 0.9) +
+  labs(title = "",
+       x = "Rolling Window", y = "Beta", color = "Sample Type") +
+  theme_minimal() +
+  scale_color_manual(values = c("In-Sample" = "darkred", "Out-of-Sample" = "darkorange"))
 
 ```
 
 ### Plotting In Sample vs Out Of Sample Statistics
 
 ```{r}
-
-p.dates <- as.Date(sapply(summary_df$test, function(x) {
-  tail(strsplit(x, " / ")[[1]], 1)
-}), format = "%Y-%m-%d")
-summary_df$Date <- p.dates  
-
-p.long <- summary_df |>
-  select(Date, mu_IS, var_IS, SR_IS, mu_OOS, var_OOS, SR_OOS) |>
-  pivot_longer(-Date, names_to = "Metric", values_to = "Value") |>
+library(tidyr)
+summary_df <- do.call(rbind, lapply(seq_along(results), function(i) {
+  x <- results[[i]]
+  data.frame(
+    Window = i,  
+    train = x$train_period,
+    test = x$test_period,
+    mu_IS = x$mu_IS, var_IS = x$var_IS, SR_IS = x$SR_IS,
+    mu_OOS = x$mu_OOS, var_OOS = x$var_OOS, SR_OOS = x$SR_OOS,
+    alpha_IS = x$alpha_IS, beta_IS = x$beta_IS,
+    alpha_OOS = x$alpha_OOS, beta_OOS = x$beta_OOS,
+    turnover = x$turnover,
+    tracking_error = x$tracking_error
+  )
+}))
+summary_long <- summary_df %>%
+  pivot_longer(
+    cols = c(mu_IS, var_IS, SR_IS, mu_OOS, var_OOS, SR_OOS),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
   mutate(
-    Type   = ifelse(grepl("_IS", Metric), "In-Sample", "Out-of-Sample"),
-    Metric = gsub("_(IS|OOS)", "", Metric)  
-  ) |>
-  mutate(
+    Sample = ifelse(grepl("_IS", Metric), "In-Sample", "Out-of-Sample"),
+    Metric = gsub("_(IS|OOS)", "", Metric),
     Metric = case_when(
-      Metric == "mu"  ~ "Mean",
-      Metric == "var" ~ "Variance",TRUE ~ Metric
-    ))
+      Metric == "mu" ~ "Mean",
+      Metric == "var" ~ "Variance",
+      Metric == "SR" ~ "Sharpe",
+      TRUE ~ Metric
+    )
+  )
 
-# Mean and Variance of portfolio In-Sample vs Out-of-Sample 
-p1<- p.long |>
-  filter(Metric %in% c("Mean", "Variance")) |>
-  ggplot(aes(x = Date, y = Value, color = Metric, linetype = Type)) +
+
+# Mean
+ggplot(subset(summary_long, Metric == "Mean"),
+       aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
   geom_line(linewidth = 0.9) +
   labs(
     title = "",
-    x = "Date", y = "Value",
-    color = "Measure", linetype = "Sample"
+    x = "Rolling Window",
+    y = "Mean Return"
+  ) +
+  theme_minimal()
+
+# Variance 
+ggplot(subset(summary_long, Metric == "Variance"),
+       aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = "",
+    x = "Rolling Window",
+    y = "Variance"
+  ) +
+  theme_minimal()
+
+# Sharpe Ratio 
+ggplot(subset(summary_long, Metric == "Sharpe"),
+       aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = "",
+    x = "Rolling Window",
+    y = "Sharpe Ratio"
+  ) +
+  theme_minimal()
+
+
+
+
+```
+
+
+
+### Portfolio Weights
+```{r}
+# Combine all rolling window weights into a single data frame
+weights_df <- do.call(rbind, lapply(seq_along(results), function(i) {
+  data.frame(
+    Window = i,                  # numeric window index
+    Asset  = results[[i]]$assets,# asset names
+    Weight = results[[i]]$weights,# corresponding weights
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Evolution of Black-Litterman Portfolio Weights
+ggplot(weights_df, aes(x = Window, y = Asset, fill = Weight)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  scale_x_continuous(
+    breaks = seq(min(weights_df$Window), max(weights_df$Window), by = 5)
+  ) +
+  labs(
+    title = "",
+    x = "Rolling Window Index",
+    y = "Asset",
+    fill = "Weight"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-# Sharpe Ratios of portfolios In-Sample vs Out-of-Sample 
-p2 <- p.long |>
-  filter(Metric == "SR") |>
-  ggplot(aes(x = Date, y = Value, color = Type, linetype = Type)) +
+```
+
+
+
+### Tracking Error
+```{r}
+### Tracking Error Plot
+tracking_error_df <- data.frame(
+  Window = 1:length(results),
+  TrackingError = sapply(results, function(x) x$tracking_error)
+)
+# Rolling Window Tracking Error vs ALSI
+ggplot(tracking_error_df, aes(x = Window, y = TrackingError)) +
   geom_line(linewidth = 0.9) +
-  labs(
-    title = "",
-    x = "Date", y = "Sharpe Ratio",
-    color = "Sample", linetype = "Sample"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-p1
-p2
-
-```
-
-## Validation checks
-```{r}
-head(rets_opt)    # returns matrix for equities (JSE indices)
-head(rets_cash)   # returns matrix for cash (STEFI)
-# Check dimensions and missing data
-dim(rets_opt)
-summary(rets_opt)
-any(is.na(rets_opt))
-
-# Check cash
-if(!is.null(rets_cash)) summary(rets_cash)
+  geom_hline(yintercept = 0.03, linetype="dashed") +
+  geom_hline(yintercept = 0.10, linetype="dashed") +
+  labs(title = "",
+       x = "Rolling Window", y = "Tracking Error") +
+  theme_minimal()
 
 ```
 
 
-
-## Test Case
-```{r}
-Pi_test <- c(0.25,0.1,0.05)
-Sigma_test <- matrix(c(0.09,0.024,-0.006,
-                       0.024,0.01,0.0003,
-                      -0.006,0.0003,0.0025), 3,3, byrow=TRUE)
-P_test <- matrix(c(1,-1,0,
-                   0,1,-1),2,3, byrow=TRUE)
-Q_test <- c(0.2,-0.05)
-Omega_test <- matrix(c(0.3,0,0,0.55),2,2)
-
-```
-
-## No NA's
-```{r}
-rets_clean <- na.locf(rets_opt)  # removes rows with any NA
-# Report dimensions
-cat("Original rets_opt dimensions:", dim(rets_opt), "\n")
-cat("Dimensions after removing NA rows:", dim(rets_clean), "\n")
-
-# Check first few rows
-head(rets_clean)
-```
-
-## 

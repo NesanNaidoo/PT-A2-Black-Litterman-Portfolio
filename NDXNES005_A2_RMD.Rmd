@@ -1,8 +1,366 @@
 ---
-title: "PT A2 2025"
-author: "Nesan Naidoo"
-date: '`r Sys.Date()`'
-output: pdf_document
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true   # correct spelling with underscore
+fontsize: 12pt
+header-includes:
+  - \usepackage{setspace}
+  - \onehalfspacing
+  - \usepackage{etoolbox}
+  - \apptocmd{\thebibliography}{\setlength{\itemsep}{1.0\baselineskip}}{}{}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{float}
+  - \usepackage{graphicx}
+  - \usepackage{fvextra}
+  - \usepackage{adjustbox}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+execute:
+  warning: FALSE
+  message: FALSE
+  fig.width: 7        
+  fig.height: 5       
+results: asis
 ---
+#  PART II : Implement and Historically Simulate the Black-Litterman Model in a R script le
+### 2.1 Libraries [@Tim_prep]
 
-test2
+```{r}
+# load required libraries
+suppressPackageStartupMessages({
+library(openxlsx)     
+library(timeSeries)   
+library(xts)          
+library(zoo)          
+library(matrixStats) 
+library(quadprog)     
+library(knitr)        
+library(dplyr)        
+library(ggplot2)      
+library(tidyr)  
+})
+```
+
+### 2.2 Load data and preprocessing [@Tim_prep]
+
+```{r}
+# reading in all 4 sheets into a list
+dfS <- list()
+for (i in 1:4) {
+  dfS[[i]] <- read.xlsx("_raw_data/PT-TAA-JSE-Daily-1994-2017.xlsx", sheet = i, detectDates = TRUE)
+  cat("Sheet", i, "loaded with dimensions:", dim(dfS[[i]]), "\n")
+}
+
+# define entities and which assets to keep
+Entities <- c('X1','STEFI','ALBI','J203','J500', sprintf("J5%d", seq(10,90,by=10)))
+Items    <- c('Date','TRI','Stefi')
+
+#cleaning each sheet
+for (i in 1:4) {
+  tI0 <- sapply(colnames(dfS[[i]]), function(x) any(grepl(paste(Entities, collapse="|"), x)))
+  tI1 <- sapply(dfS[[i]][2,], function(x) any(grepl(paste(Items, collapse="|"), x)))
+  tI  <- tI0 & tI1
+  
+  # remove header rows
+  dfS[[i]] <- dfS[[i]][-c(1,2), tI]
+  names(dfS[[i]])[1] <- "Date"
+  
+  newColNames <- strsplit(colnames(dfS[[i]]), ":")
+  for(m in 2:length(newColNames)) names(dfS[[i]])[m] <- newColNames[[m]][1]
+  
+  cat("Sheet", i, "columns after cleaning:", colnames(dfS[[i]]), "\n")
+}
+
+# fixing ALBI column
+dfS[[1]][,2] <- as.numeric(dfS[[1]][,2])  
+dfS[[1]] <- dfS[[1]][!is.na(dfS[[1]][,2]), ]#removes rows where ALBI is NA
+
+```
+
+### 2.3 Merge into single timeSeries object [@Tim_prep]
+
+```{r}
+
+# converts first sheet to timeSeries
+tsTAA <- timeSeries(dfS[[1]][, 2:ncol(dfS[[1]])], as.Date(dfS[[1]][,1]))
+cat("Initial tsTAA dimensions:", dim(tsTAA), "\n")
+
+# merges remaining sheets
+for (i in 2:4) {
+  tsTmp <- timeSeries(dfS[[i]][, 2:ncol(dfS[[i]])], as.Date(dfS[[i]][,1]))
+  tsTAA <- cbind(tsTAA, tsTmp)
+  cat("After merging sheet", i, "dimensions:", dim(tsTAA), "\n")
+}
+# renaming indices for clarity
+setFinCenter(tsTAA) <- "Johannesburg"
+names(tsTAA)[grep("TS.1.1", names(tsTAA))] <- "ALBI"
+names(tsTAA)[grep("TS.1.2", names(tsTAA))] <- "STEFI"
+names(tsTAA)[grep("TS.1", names(tsTAA))] <- "ALSI"
+
+cat("Columns after renaming:", colnames(tsTAA), "\n")
+
+#all numeric columns are numeric
+for (j in 1:ncol(tsTAA)) {
+  tsTAA[, j] <- as.numeric(tsTAA[, j])
+}
+#remove rows with all NAs
+tsTAA <- tsTAA[rowSums(is.na(tsTAA)) < ncol(tsTAA), ]
+
+# Using timeSeries daily2monthly and ensure tsTAA is valid
+tsTAA_monthly <- tryCatch(
+  daily2monthly(tsTAA),
+  error = function(e) {
+    stop("Error in daily2monthly: tsTAA might contain non-timeSeries columns or non-numeric values")
+  }
+)
+
+#  monthly price index
+tsIdx  <- index2wealth(tsTAA_monthly)
+
+# geometric monthly returns
+tsGRet <- diff(log(tsIdx))
+
+cat("tsTAA_monthly dimensions:", dim(tsTAA_monthly), "\n")
+cat("tsGRet dimensions:", dim(tsGRet), "\n")
+cat("Columns in tsGRet:\n"); print(colnames(tsGRet))
+```
+
+### 2.4 Arithmetic Returns [@Tim_BTmlx]
+
+```{r}
+
+setFinCenter(tsTAA) <- "Africa/Johannesburg"
+summary(dfS[[1]][,2])
+
+# Checks that tsTAA is a proper 'timeSeries' object
+tsTAA_monthly <- tryCatch(
+  daily2monthly(tsTAA),
+  error = function(e) {
+    message("Error in daily2monthly(): converting tsTAA to xts first")
+    xts_obj <- as.xts(tsTAA)
+    apply.monthly(xts_obj, colMeans, na.rm=TRUE)
+  }
+)
+
+
+
+#geometric returns
+tsGRet <- diff(log(tsTAA_monthly))
+
+#  fill missing data using LOCF
+tsGRet_filled <- na.locf(as.xts(tsGRet), na.rm = FALSE)
+summary(tsGRet_filled[,"ALBI"])
+any(!is.na(tsGRet_filled[,"ALBI"]))
+
+#checking for columns that are all NA
+cols_allNA <- colSums(!is.na(tsGRet_filled)) == 0
+tsGRet_filled <- tsGRet_filled[, !cols_allNA]
+
+# converting to arithmetic returns
+simple_mat <- exp(as.matrix(tsGRet_filled)) - 1
+rets_xts <- xts(simple_mat, order.by = index(tsGRet_filled))
+colnames(rets_xts) <- colnames(tsGRet_filled)
+
+# Excludes cash asset
+cash_idx <- grep("STEFI", colnames(rets_xts), ignore.case = TRUE)
+cash_name <- ifelse(length(cash_idx) > 0, colnames(rets_xts)[cash_idx[1]], NA)
+
+rets_opt <- if(!is.na(cash_name)) rets_xts[, -cash_idx, drop=FALSE] else rets_xts
+rets_cash <- if(!is.na(cash_name)) rets_xts[, cash_idx, drop=FALSE] else NULL
+
+cat("Assets used for optimisation:\n"); print(colnames(rets_opt))
+if(!is.na(cash_name)) cat("Cash excluded from optimisation:", cash_name, "\n")
+```
+
+### 2.5 Tangency Portfolio [@Tim_BTmlx; @Tim_prep]
+
+```{r}
+tan.port <- function(mu, Sigma, rf=0, targets=seq(0.001,0.05,length.out=200)){
+  n <- length(mu)
+  Dmat <- 2*(Sigma + diag(1e-8,n))  # ensure PD covariance
+  best <- list(sharpe=-Inf)
+  
+  for(tgt in targets){
+    gamma <- as.numeric(mu - rf)
+    Amat <- cbind(gamma, -gamma, rep(1,n), -rep(1,n), diag(n))
+    bvec <- c(tgt, -tgt, 1, -1, rep(0,n))
+    sol <- try(solve.QP(Dmat, dvec=rep(0,n), Amat=as.matrix(Amat), bvec=bvec, meq=0), silent=TRUE)
+    if(inherits(sol,"try-error")) next
+    w <- sol$solution
+    w[w<1e-8] <- 0
+    if(sum(w)<=0) next
+    w <- w/sum(w)
+    port_mean <- sum(w*mu)
+    port_var  <- as.numeric(t(w) %*% Sigma %*% w)
+    if(port_var<=0) next
+    sr <- (port_mean - rf)/sqrt(port_var)
+    if(sr > best$sharpe) best <- list(weights=w, target=tgt, sharpe=sr, mean=port_mean, var=port_var)
+  }
+  return(best)
+}
+```
+
+### 2.6 Rolling Window Experiment [@Tim_BTmlx; @Tim_prep]
+
+```{r}
+train.m <- 60 # 5 year period
+test.m  <- 12 # 1 year period
+roll_step <- 1 #1 month increments
+n_obs <- nrow(rets_opt)
+start_idxs <- seq(1, n_obs - train.m - test.m + 1, by=roll_step)
+results <- list()
+
+for(i in seq_along(start_idxs)){
+  s <- start_idxs[i]
+  train_idx <- s:(s+train.m-1)
+  tst.idx  <- (s+train.m):(s+train.m+test.m-1)
+  
+  train_rets <- rets_opt[train_idx, , drop=FALSE]
+  tst.rets  <- rets_opt[tst.idx, , drop=FALSE]
+  
+  if(any(!is.finite(as.matrix(train_rets))) || any(!is.finite(as.matrix(tst.rets)))) next
+  
+  mu_train    <- colMeans(train_rets, na.rm=TRUE)
+ Sigma_train <- cov(as.matrix(train_rets), use="complete.obs")
+
+  rf_train    <- if(!is.null(rets_cash)) mean(rets_cash[train_idx, ], na.rm=TRUE) else 0
+  rf_test     <- if(!is.null(rets_cash)) mean(rets_cash[tst.idx, ], na.rm=TRUE) else 0
+  
+  # Skip invalid windows
+  if(any(!is.finite(mu_train)) || !is.finite(rf_train)) next
+  upper_targ <- max(0.06, max(mu_train, na.rm=TRUE) - rf_train)
+  if(!is.finite(upper_targ) || upper_targ <= 0) next
+  
+  targ_grid <- seq(0.0005, upper_targ, length.out=300)
+  tang <- tan.port(mu=mu_train, Sigma=Sigma_train, rf=rf_train, targets=targ_grid)
+  if(is.null(tang$weights)) next
+  
+  w_hat <- tang$weights
+  port_train <- as.numeric(as.matrix(train_rets) %*% w_hat)
+  port_test  <- as.numeric(as.matrix(tst.rets) %*% w_hat)
+
+  
+  results[[length(results)+1]] <- list(
+    train_period = paste(index(train_rets)[1], index(train_rets)[nrow(train_rets)], sep=" / "),
+    tst.period  = paste(index(tst.rets)[1], index(tst.rets)[nrow(tst.rets)], sep=" / "),
+    mu_IS = mean(port_train, na.rm=TRUE),
+    var_IS= var(port_train, na.rm=TRUE),
+    SR_IS =(mean(port_train, na.rm=TRUE)-rf_train)/sqrt(var(port_train, na.rm=TRUE)),
+    mu_OOS= mean(port_test, na.rm=TRUE),
+    var_OOS=var(port_test, na.rm=TRUE),
+    SR_OOS=(mean(port_test, na.rm=TRUE)-rf_test)/sqrt(var(port_test, na.rm=TRUE)),
+    weights = w_hat,
+    assets  = colnames(rets_opt)
+  )
+}
+
+summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
+  train=x$train_period, test=x$tst.period,
+  mu_IS=x$mu_IS, var_IS=x$var_IS, SR_IS=x$SR_IS,
+  mu_OOS=x$mu_OOS, var_OOS=x$var_OOS, SR_OOS=x$SR_OOS
+)))
+knitr::kable(
+  head(summary_df, 15),
+  digits = 4,
+  caption = "In-sample vs Out-of-sample Portfolio Statistics"
+)
+
+
+```
+
+### Plotting In Sample vs Out Of Sample Statistics
+
+```{r}
+
+p.dates <- as.Date(sapply(summary_df$test, function(x) {
+  tail(strsplit(x, " / ")[[1]], 1)
+}), format = "%Y-%m-%d")
+summary_df$Date <- p.dates  
+
+p.long <- summary_df |>
+  select(Date, mu_IS, var_IS, SR_IS, mu_OOS, var_OOS, SR_OOS) |>
+  pivot_longer(-Date, names_to = "Metric", values_to = "Value") |>
+  mutate(
+    Type   = ifelse(grepl("_IS", Metric), "In-Sample", "Out-of-Sample"),
+    Metric = gsub("_(IS|OOS)", "", Metric)  
+  ) |>
+  mutate(
+    Metric = case_when(
+      Metric == "mu"  ~ "Mean",
+      Metric == "var" ~ "Variance",TRUE ~ Metric
+    ))
+
+# Mean and Variance of portfolio In-Sample vs Out-of-Sample 
+p1<- p.long |>
+  filter(Metric %in% c("Mean", "Variance")) |>
+  ggplot(aes(x = Date, y = Value, color = Metric, linetype = Type)) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = "",
+    x = "Date", y = "Value",
+    color = "Measure", linetype = "Sample"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Sharpe Ratios of portfolios In-Sample vs Out-of-Sample 
+p2 <- p.long |>
+  filter(Metric == "SR") |>
+  ggplot(aes(x = Date, y = Value, color = Type, linetype = Type)) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = "",
+    x = "Date", y = "Sharpe Ratio",
+    color = "Sample", linetype = "Sample"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p1
+p2
+
+```
+
+## Validation checks
+```{r}
+head(rets_opt)    # returns matrix for equities (JSE indices)
+head(rets_cash)   # returns matrix for cash (STEFI)
+# Check dimensions and missing data
+dim(rets_opt)
+summary(rets_opt)
+any(is.na(rets_opt))
+
+# Check cash
+if(!is.null(rets_cash)) summary(rets_cash)
+
+```
+
+
+
+## Test Case
+```{r}
+Pi_test <- c(0.25,0.1,0.05)
+Sigma_test <- matrix(c(0.09,0.024,-0.006,
+                       0.024,0.01,0.0003,
+                      -0.006,0.0003,0.0025), 3,3, byrow=TRUE)
+P_test <- matrix(c(1,-1,0,
+                   0,1,-1),2,3, byrow=TRUE)
+Q_test <- c(0.2,-0.05)
+Omega_test <- matrix(c(0.3,0,0,0.55),2,2)
+
+```
+
+## No NA's
+```{r}
+rets_clean <- na.locf(rets_opt)  # removes rows with any NA
+# Report dimensions
+cat("Original rets_opt dimensions:", dim(rets_opt), "\n")
+cat("Dimensions after removing NA rows:", dim(rets_clean), "\n")
+
+# Check first few rows
+head(rets_clean)
+```
+
+## 

@@ -2,29 +2,28 @@
 output: 
   pdf_document:
     latex_engine: xelatex
-    keep_tex: true   # correct spelling with underscore
+    keep_tex: true  
 fontsize: 12pt
 header-includes:
   - \usepackage{setspace}
   - \onehalfspacing
   - \usepackage{etoolbox}
-  - \apptocmd{\thebibliography}{\setlength{\itemsep}{1.0\baselineskip}}{}{}
-  - \usepackage{amsmath}
-  - \usepackage{amssymb}
   - \usepackage{float}
   - \usepackage{graphicx}
   - \usepackage{fvextra}
-  - \usepackage{adjustbox}
-  - \usepackage{tabu}
-  - \usepackage{threeparttable}
 execute:
   warning: FALSE
   message: FALSE
   fig.width: 7        
   fig.height: 5       
 results: asis
+bibliography: Sources.bib  
+nocite: '@*'
+csl: _citation_style/apa.csl    
 ---
-#  PART II : Implement and Historically Simulate the Black-Litterman Model in a R script le
+#  Appendix B : Code
+Coding for this section was completed using RStudio 2024.09.0+375 ("Cranberry Hibiscus" Release) and was based on R and MATLAB code provided by Professor Tim Gebbie(STA4028Z).
+
 ### 2.1 Libraries [@Tim_prep]
 
 ```{r}
@@ -40,6 +39,7 @@ library(knitr)
 library(dplyr)        
 library(ggplot2)      
 library(tidyr)  
+library(PerformanceAnalytics)
 })
 ```
 
@@ -217,19 +217,16 @@ sum(bl_test$weights)
 ### 2.6 Rolling Window Experiment [@Tim_BTmlx; @Tim_prep]
 
 ```{r}
-### Rolling-window Black-Litterman Backtest with Turnover, Beta, and Jensen Alpha
-
-library(PerformanceAnalytics) # for CAPM functions
-
-train.m <- 60  # 5-year training period
-test.m  <- 12  # 1-year test period
-roll_step <- 1 # 1-month increments
+### Rolling-window Black-Litterman Backtest 
+train.m <- 60  # 5 yr training period
+test.m  <- 12  # 1 yr test period
+roll_step <- 1 # 1-mthincrements
 n_obs <- nrow(rets_opt)
 start_idxs <- seq(1, n_obs - train.m - test.m + 1, by=roll_step)
 results <- list()
-prev_w <- rep(0, ncol(rets_opt)) # initialize previous weights for turnover
+prev_w <- rep(0, ncol(rets_opt)) # initialising previous weights for turnover
 
-# ALSI column for beta calculation
+# ALSI column for beta calc
 benchmark <- tsGRet_filled[, "ALSI", drop=FALSE]
 
 for(i in seq_along(start_idxs)){
@@ -242,7 +239,7 @@ for(i in seq_along(start_idxs)){
   bench_train <- benchmark[train_idx, , drop=FALSE]
   bench_test  <- benchmark[tst.idx, , drop=FALSE]
   
-  # Skip invalid windows
+  # invalid windows
   if(any(!is.finite(as.matrix(train_rets))) || any(!is.finite(as.matrix(tst_rets)))) next
   
   mu_train    <- colMeans(train_rets, na.rm=TRUE)
@@ -252,41 +249,38 @@ for(i in seq_along(start_idxs)){
   rf_train <- if(!is.null(rets_cash)) mean(rets_cash[train_idx, ], na.rm=TRUE) else 0
   rf_test  <- if(!is.null(rets_cash)) mean(rets_cash[tst.idx, ], na.rm=TRUE) else 0
   
-  # --- Black-Litterman views ---
+  # Black-Litterman views
   P <- matrix(0, nrow=1, ncol=ncol(train_rets))
-  P[1, 1:3] <- 1/3       # simple example view
+  P[1, 1:3] <- 1/3       # simple view
   Q <- matrix(0.01, nrow=1) # expected 1% return
   Omega <- matrix(0.0001, nrow=1) # view uncertainty
   
   bl_res <- blacklittermann(Pi=mu_train, Sigma=Sigma_train, P=P, Q=Q, Omega=Omega, tau=0.05, gamma=3,constrain=FALSE)
   
-  # --- Constrain weights: no short, fully invested ---
+  # Constraint weights: no short, fully invested 
   w_hat <- bl_res$weights
   w_hat[w_hat < 0] <- 0
   w_hat <- w_hat / sum(w_hat)
   
-  # --- Portfolio turnover ---
   turnover <- sum(abs(w_hat - prev_w))
   prev_w <- w_hat
   
-  # --- Portfolio returns ---
+  # Portfolio returns 
   port_train <- as.numeric(as.matrix(train_rets) %*% w_hat)
   port_test  <- as.numeric(as.matrix(tst_rets) %*% w_hat)
   
-  # --- Tracking Error relative to ALSI ---
+  # Tracking Error relative to ALSI 
 port_diff <- port_test - as.numeric(bench_test)
-tracking_error <- sd(port_diff, na.rm = TRUE)
+t.err <- sd(port_diff, na.rm = TRUE)
   
-  # --- Jensen Alpha & Beta relative to ALSI ---
-  # In-sample excess returns
-excess_port_train  <- port_train  - rf_train
-excess_bench_train <- as.numeric(bench_train) - rf_train
-
-CAPM_train <- lm(excess_port_train ~ excess_bench_train)
+  # Jensen Alpha & Beta relative to ALSI 
+xcess.p.train  <- port_train  - rf_train
+xcess.b.train <- as.numeric(bench_train) - rf_train
+CAPM_train <- lm(xcess.p.train ~ xcess.b.train)
 alpha_IS <- coef(CAPM_train)[1]
 beta_IS  <- coef(CAPM_train)[2]
 
-# Out-of-sample excess returns
+# OOS excess returns
 excess_port_test  <- port_test  - rf_test
 excess_bench_test <- as.numeric(bench_test) - rf_test
 
@@ -294,10 +288,10 @@ CAPM_test <- lm(excess_port_test ~ excess_bench_test)
 alpha_OOS <- coef(CAPM_test)[1]
 beta_OOS  <- coef(CAPM_test)[2]
   
-  # --- Cumulative equity curve ---
-  eq_curve_test <- cumprod(1 + port_test)
+  # Cumulative equity curve 
+eq_curve_test <- cumprod(1 + port_test)
   
-  # Store results
+  # Results
   results[[length(results)+1]] <- list(
   train_period = paste(index(train_rets)[1], index(train_rets)[nrow(train_rets)], sep=" / "),
   test_period  = paste(index(tst_rets)[1], index(tst_rets)[nrow(tst_rets)], sep=" / "),
@@ -312,7 +306,7 @@ beta_OOS  <- coef(CAPM_test)[2]
   alpha_OOS = alpha_OOS,
   beta_OOS = beta_OOS,
   turnover = turnover,
-  tracking_error = tracking_error,   # ✅ <-- added
+  t.err = t.err,   
   eq_curve_test = eq_curve_test,
   weights = w_hat,
   assets  = colnames(rets_opt)
@@ -320,7 +314,7 @@ beta_OOS  <- coef(CAPM_test)[2]
 
 }
 
-# Convert results to a data frame for plotting
+# makes it easier to plot
 summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
   train=x$train_period, test=x$test_period,
   mu_IS=x$mu_IS, var_IS=x$var_IS, SR_IS=x$SR_IS,
@@ -328,19 +322,19 @@ summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
   alpha_IS=x$alpha_IS, beta_IS=x$beta_IS,
   alpha_OOS=x$alpha_OOS, beta_OOS=x$beta_OOS,
   turnover=x$turnover,
-  tracking_error = x$tracking_error   
+  t.err = x$t.err   
 )))
 
 
-knitr::kable(summary_df,
+knitr::kable(head(summary_df,5),
   digits = 4,
-  caption = "In-sample vs Out-of-sample BL Portfolio Statistics with Turnover, Alpha and Beta"
+  caption = "In-sample vs Out-of-sample BL Portfolio Statistics"
 )
 
 
 ```
 
-### Portfolio Turnover
+### 2.7 Portfolio Turnover
 ```{r}
 turnover_df <- data.frame(
   Window = 1:length(results),
@@ -357,12 +351,10 @@ ggplot(turnover_df, aes(x = Window, y = Turnover)) +
 ```
 
 
-### Jensens alpha and beta
+### 2.8 Jensens alpha and beta
 ```{r}
-library(ggplot2)
-
-# Create data frame with both in-sample and out-of-sample Alpha and Beta
-alpha_beta_df <- data.frame(
+# in-sample and out-of-sample Alpha and Beta
+ab_df <- data.frame(
   Window = 1:length(results),
   alpha_IS = sapply(results, function(x) x$alpha_IS),
   alpha_OOS = sapply(results, function(x) x$alpha_OOS),
@@ -371,7 +363,7 @@ alpha_beta_df <- data.frame(
 )
 
 # In-Sample vs. Out-of-Sample Jensen's Alpha
-ggplot(alpha_beta_df, aes(x = Window)) +
+ggplot(ab_df, aes(x = Window)) +
   geom_line(aes(y = alpha_IS, color = "In-Sample"), linewidth = 0.9) +
   geom_line(aes(y = alpha_OOS, color = "Out-of-Sample"), linewidth = 0.9) +
   labs(title = "",
@@ -380,7 +372,7 @@ ggplot(alpha_beta_df, aes(x = Window)) +
   scale_color_manual(values = c("In-Sample" = "darkgreen", "Out-of-Sample" = "darkblue"))
 
 # In-Sample vs. Out-of-Sample Portfolio Beta
-ggplot(alpha_beta_df, aes(x = Window)) +
+ggplot(ab_df, aes(x = Window)) +
   geom_line(aes(y = beta_IS, color = "In-Sample"), linewidth = 0.9) +
   geom_line(aes(y = beta_OOS, color = "Out-of-Sample"), linewidth = 0.9) +
   labs(title = "",
@@ -390,7 +382,7 @@ ggplot(alpha_beta_df, aes(x = Window)) +
 
 ```
 
-### Plotting In Sample vs Out Of Sample Statistics
+### 2.9 Plotting In Sample vs Out Of Sample Statistics
 
 ```{r}
 library(tidyr)
@@ -405,10 +397,10 @@ summary_df <- do.call(rbind, lapply(seq_along(results), function(i) {
     alpha_IS = x$alpha_IS, beta_IS = x$beta_IS,
     alpha_OOS = x$alpha_OOS, beta_OOS = x$beta_OOS,
     turnover = x$turnover,
-    tracking_error = x$tracking_error
+    t.err = x$t.err
   )
 }))
-summary_long <- summary_df %>%
+sum_l <- summary_df %>%
   pivot_longer(
     cols = c(mu_IS, var_IS, SR_IS, mu_OOS, var_OOS, SR_OOS),
     names_to = "Metric",
@@ -427,7 +419,7 @@ summary_long <- summary_df %>%
 
 
 # Mean
-ggplot(subset(summary_long, Metric == "Mean"),
+ggplot(subset(sum_l, Metric == "Mean"),
        aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
   geom_line(linewidth = 0.9) +
   labs(
@@ -438,7 +430,7 @@ ggplot(subset(summary_long, Metric == "Mean"),
   theme_minimal()
 
 # Variance 
-ggplot(subset(summary_long, Metric == "Variance"),
+ggplot(subset(sum_l, Metric == "Variance"),
        aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
   geom_line(linewidth = 0.9) +
   labs(
@@ -449,7 +441,7 @@ ggplot(subset(summary_long, Metric == "Variance"),
   theme_minimal()
 
 # Sharpe Ratio 
-ggplot(subset(summary_long, Metric == "Sharpe"),
+ggplot(subset(sum_l, Metric == "Sharpe"),
        aes(x = Window, y = Value, color = Sample, linetype = Sample)) +
   geom_line(linewidth = 0.9) +
   labs(
@@ -466,14 +458,14 @@ ggplot(subset(summary_long, Metric == "Sharpe"),
 
 
 
-### Portfolio Weights
+### 2.10 Portfolio Weights
 ```{r}
 # Combine all rolling window weights into a single data frame
 weights_df <- do.call(rbind, lapply(seq_along(results), function(i) {
   data.frame(
-    Window = i,                  # numeric window index
+    Window = i, #index
     Asset  = results[[i]]$assets,# asset names
-    Weight = results[[i]]$weights,# corresponding weights
+    Weight = results[[i]]$weights,#  weights
     stringsAsFactors = FALSE
   )
 }))
@@ -498,15 +490,15 @@ ggplot(weights_df, aes(x = Window, y = Asset, fill = Weight)) +
 
 
 
-### Tracking Error
+### 2.11 Tracking Error
 ```{r}
 ### Tracking Error Plot
-tracking_error_df <- data.frame(
+t.err_df <- data.frame(
   Window = 1:length(results),
-  TrackingError = sapply(results, function(x) x$tracking_error)
+  TrackingError = sapply(results, function(x) x$t.err)
 )
 # Rolling Window Tracking Error vs ALSI
-ggplot(tracking_error_df, aes(x = Window, y = TrackingError)) +
+ggplot(t.err_df, aes(x = Window, y = TrackingError)) +
   geom_line(linewidth = 0.9) +
   geom_hline(yintercept = 0.03, linetype="dashed") +
   geom_hline(yintercept = 0.10, linetype="dashed") +
@@ -516,4 +508,5 @@ ggplot(tracking_error_df, aes(x = Window, y = TrackingError)) +
 
 ```
 
+\newpage
 

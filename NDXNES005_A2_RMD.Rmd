@@ -1,4 +1,5 @@
 ---
+title: "Appendix B : Code"
 output: 
   pdf_document:
     latex_engine: xelatex
@@ -19,9 +20,9 @@ execute:
 results: asis
 bibliography: Sources.bib  
 nocite: '@*'
-csl: _citation_style/apa.csl    
+csl: _citation_style/apa.csl 
+date: "`r Sys.Date()`"
 ---
-#  Appendix B : Code
 Coding for this section was completed using RStudio 2024.09.0+375 ("Cranberry Hibiscus" Release) and was based on R and MATLAB code provided by Professor Tim Gebbie(STA4028Z).
 
 ### 2.1 Libraries [@Tim_prep]
@@ -177,21 +178,76 @@ if(!is.na(cash_name)) cat("Cash excluded from optimisation:", cash_name, "\n")
 ### 2.5 Black-Litterman function [@Tim_BTmlx; @Tim_prep]
 
 ```{r}
-blacklittermann <- function(Pi, Sigma, P, Q, Omega, tau=0.05, gamma=1, constrain=TRUE){
-  n <- length(Pi)
-  Sigma_inv <- solve(Sigma)
-  Omega_inv <- solve(Omega)
-  mu_post <- solve(Sigma_inv*tau + t(P) %*% Omega_inv %*% P) %*%
+# ---------------------------------------------------------------------
+# Function: blacklitterman
+# ---------------------------------------------------------------------
+# BLACKLITTERMAN computes the posterior mean vector, posterior covariance
+# matrix, and optimal Black–Litterman portfolio weights.
+#
+# Inputs:
+#   Pi      : (n x 1) vector of equilibrium excess returns (prior mean)
+#   Sigma   : (n x n) covariance matrix of excess returns
+#   P       : (k x n) matrix defining k linear views on asset returns
+#   Q       : (k x 1) vector of view returns
+#   Omega   : (k x k) diagonal covariance matrix of view uncertainty
+#   tau     : scalar (typically small, e.g. 0.05), controls prior confidence
+#   gamma   : scalar, risk aversion parameter
+#   constrain : logical, if TRUE set negative weights to zero and renormalise
+#
+# Outputs:
+#   A list containing:
+#       $weights     - posterior (Black–Litterman) portfolio weights
+#       $mu_post     - posterior mean vector E[R | views]
+#       $Sigma_post  - posterior covariance matrix Cov[R | views]
+#
+# ---------------------------------------------------------------------
+
+blacklitterman <- function(Pi, Sigma, P, Q, Omega, tau = 0.05, gamma = 1, constrain = TRUE) {
+
+  # -------------------------------------------------------------------
+  # Define matrix dimensions and inverses
+  # -------------------------------------------------------------------
+  n <- length(Pi)   # number of assets
+  Sigma_inv <- solve(Sigma)   # inverse of prior covariance
+  Omega_inv <- solve(Omega)   # inverse of view covariance
+
+  # -------------------------------------------------------------------
+  # Calculate posterior mean (Black–Litterman expected returns)
+  # Formula: μ* = [(τΣ)^(-1) + P'Ω^(-1)P]^(-1)[(τΣ)^(-1)Π + P'Ω^(-1)Q]
+  # -------------------------------------------------------------------
+  mu_post <- solve(Sigma_inv * tau + t(P) %*% Omega_inv %*% P) %*%
              (Sigma_inv %*% (tau * Pi) + t(P) %*% Omega_inv %*% Q)
-  Sigma_post <- Sigma + solve(Sigma_inv*tau + t(P) %*% Omega_inv %*% P)
-  w <- solve(gamma*Sigma_post) %*% mu_post
-  if(constrain){
-    w[w<0] <- 0
-    w <- w / sum(w)
+
+  # -------------------------------------------------------------------
+  # Calculate posterior covariance matrix
+  # Formula: Σ* = Σ + [(τΣ)^(-1) + P'Ω^(-1)P]^(-1)
+  # (Note: equivalent to Σ* = [(Σ/τ)^(-1) + P'Ω^(-1)P]^(-1) under scaling)
+  # -------------------------------------------------------------------
+  Sigma_post <- Sigma + solve(Sigma_inv * tau + t(P) %*% Omega_inv %*% P)
+
+  # -------------------------------------------------------------------
+  # optimal portfolio weights
+  # Formula: w* = (1/γ) Σ*^(-1) μ*
+  # -------------------------------------------------------------------
+  w <- solve(gamma * Sigma_post) %*% mu_post
+
+  # -------------------------------------------------------------------
+  # non-negativity constraint and normalisation
+  # -------------------------------------------------------------------
+  if (constrain) {
+    w[w < 0] <- 0   # set short positions to zero
+    w <- w / sum(w) # re-normalise to full investment
   }
+
+  # -------------------------------------------------------------------
+  # Assign asset names 
+  # -------------------------------------------------------------------
   w <- as.numeric(w)
   names(w) <- names(Pi)
-  list(weights=w, mu_post=mu_post, Sigma_post=Sigma_post)
+
+  return(list(weights = w,
+              mu_post = mu_post,
+              Sigma_post = Sigma_post))
 }
 
 
@@ -208,7 +264,7 @@ P <- matrix(c(1, -1, 0,
 Q <- matrix(c(0.2, -0.05), nrow=2)
 Omega <- matrix(c(0.3, 0,
                   0, 0.55), nrow=2)
-bl_test <- blacklittermann(Pi, Sigma, P, Q, Omega, tau=0.05, gamma=1, constrain=TRUE)
+bl_test <- blacklitterman(Pi, Sigma, P, Q, Omega, tau=0.05, gamma=1, constrain=TRUE)
 bl_test$weights
 sum(bl_test$weights)
 
@@ -255,7 +311,7 @@ for(i in seq_along(start_idxs)){
   Q <- matrix(0.01, nrow=1) # expected 1% return
   Omega <- matrix(0.0001, nrow=1) # view uncertainty
   
-  bl_res <- blacklittermann(Pi=mu_train, Sigma=Sigma_train, P=P, Q=Q, Omega=Omega, tau=0.05, gamma=3,constrain=FALSE)
+  bl_res <- blacklitterman(Pi=mu_train, Sigma=Sigma_train, P=P, Q=Q, Omega=Omega, tau=0.05, gamma=3,constrain=FALSE)
   
   # Constraint weights: no short, fully invested 
   w_hat <- bl_res$weights
@@ -326,7 +382,7 @@ summary_df <- do.call(rbind, lapply(results, function(x) data.frame(
 )))
 
 
-knitr::kable(head(summary_df,10),
+knitr::kable(summary_df,
   digits = 4,
   caption = "In-sample vs Out-of-sample BL Portfolio Statistics"
 )
